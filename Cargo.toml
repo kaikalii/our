@@ -1,0 +1,7 @@
+[package]
+edition = '2021'
+name = 'our'
+version = '0.1.0'
+
+[dependencies]
+parking_lot = '0.12.1'
