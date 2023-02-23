@@ -10,6 +10,12 @@
 [`Shared`] is a generic wrapper around what is usually a smart pointer to something with interior mutability.
 It provides a way to construct and access shared mutable state, and also provides a way to compare and hash shared values.
 
+Even though [`Shared`] is usually implemented with some kind of interior mutability,
+[`Shared`]'s methods that return write guards to the shared value require mutable references to the [`Shared`] itself.
+While this can be easily circumvented by simply cloning the [`Shared`], it is implemented this way to try
+to prevent at compile-time accidentally trying to acquire two exclusive guards, which would panic for non-thread-safe
+[`Shared`]s and deadlock for thread-safe ones.
+
 [`Shared`] has three type parameters:
 - The type of the shared value
 - A [`ShareKind`], which determines how the shared value is constructed and accessed
@@ -20,7 +26,9 @@ which determines how shared values are compared and hashed.
     - [`ByRef`] compares and hashes by reference
     - [`ByVal`] compares and hashes by value
 
-There are four type aliases provided for convenience:
+# Type aliases
+
+There are four type aliases for [`Shared`] provided for convenience:
 
 |                    |Non-thread-safe|Thread-safe  |
 |--------------------|---------------|-------------|
@@ -234,6 +242,8 @@ impl ShareKind for ShareSync {
 
 /// A shared, mutable value
 ///
+/// See also the [type aliases](index.html#type-aliases).
+///
 /// The implementation can be chosen with the `S` [`ShareKind`] type parameter.
 /// This crate provides [`ShareUnsync`] for non-thread-safe sharing
 /// and [`ShareSync`] for thread-safe sharing.
@@ -241,10 +251,13 @@ impl ShareKind for ShareSync {
 /// The `E` type parameter determines how the value is compared and hashed.
 /// This crate provides [`ByRef`] for comparing and hashing by reference
 /// and [`ByVal`] for comparing and hashing by value.
-///
-/// See also [`Mrc`] and [`Marc`], which a convenient aliases for `Shared`
-/// which use [`ByRef`] by default.
 pub struct Shared<T, S: ShareKind, E = ByRef>(S::Inner<T>, PhantomData<E>);
+
+impl<T: Default, S: ShareKind, E> Default for Shared<T, S, E> {
+    fn default() -> Self {
+        Shared::new(Default::default())
+    }
+}
 
 impl<T, S: ShareKind, E> From<T> for Shared<T, S, E> {
     fn from(t: T) -> Self {
