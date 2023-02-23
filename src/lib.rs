@@ -3,12 +3,12 @@
 /*!
 # Description
 
-`our` provides a highly generic shared mutable state abstraction.
+`our` provides a highly generic shared mutable data abstraction.
 
 # Usage
 
 [`Shared`] is a generic wrapper around what is usually a smart pointer to something with interior mutability.
-It provides a way to construct and access shared mutable state, and also provides a way to compare and hash shared values.
+It provides a way to construct and access shared mutable data, and also provides a way to compare and hash shared values.
 
 Even though [`Shared`] is usually implemented with some kind of interior mutability,
 [`Shared`]'s methods that return write guards to the shared value require mutable references to the [`Shared`] itself.

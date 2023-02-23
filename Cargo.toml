@@ -1,6 +1,14 @@
 [package]
+authors = ['Kaikalii <kaikaliischmidt@gmail.com>']
+categories = ['data-structures', 'concurrency', 'memory-management', 'rust-patterns']
+description = 'Ergonomic, highly generic wrapper for shared mutable data'
+documentation = 'https://docs.rs/our'
 edition = '2021'
+keywords = ['reference-counting', 'share', 'mutable', 'object']
+license = 'Unlicense'
 name = 'our'
+readme = 'readme.md'
+repository = 'https://github.com/kaikalii/our'
 version = '0.1.0'
 
 [dependencies]
