@@ -497,6 +497,12 @@ impl<T, S: ShareKind, E: EqualityKind<T>> PartialEq for Shared<T, S, E> {
     }
 }
 
+impl<'a, T, S: ShareKind, E: EqualityKind<T>> PartialEq<&'a Self> for Shared<T, S, E> {
+    fn eq(&self, other: &&'a Self) -> bool {
+        E::eq::<S>(&self.0, &other.0)
+    }
+}
+
 impl<T: PartialEq, S: ShareKind> PartialEq<T> for Shared<T, S, ByVal> {
     fn eq(&self, other: &T) -> bool {
         *self.get() == *other
@@ -581,6 +587,12 @@ macro_rules! guard_impl {
 
         impl<'a, T: PartialEq, K: ShareKind> PartialEq for $ty<'a, T, K> {
             fn eq(&self, other: &Self) -> bool {
+                self.deref().eq(other.deref())
+            }
+        }
+
+        impl<'a, 'b, T: PartialEq, K: ShareKind> PartialEq<&'b Self> for $ty<'a, T, K> {
+            fn eq(&self, other: &&'b Self) -> bool {
                 self.deref().eq(other.deref())
             }
         }
