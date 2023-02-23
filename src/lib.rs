@@ -1,3 +1,54 @@
+#![warn(missing_docs)]
+
+/*!
+# Description
+
+`our` provides a highly generic shared mutable state abstraction.
+
+# Usage
+
+[`Shared`] is a generic wrapper around what is usually a smart pointer to something with interior mutability.
+It provides a way to construct and access shared mutable state, and also provides a way to compare and hash shared values.
+
+[`Shared`] has three type parameters:
+- The type of the shared value
+- A [`ShareKind`], which determines how the shared value is constructed and accessed
+    - [`ShareUnsync`] is a non-thread-safe shared value implemented as `Rc<RefCell<T>>`
+    - [`ShareSync`] is a thread-safe shared value implemented as `Arc<parking_lot::RwLock<T>>`
+- A type which usually implements [`EqualityKind`], [`CompareKind`], and [`HashKind`],
+which determines how shared values are compared and hashed.
+    - [`ByRef`] compares and hashes by reference
+    - [`ByVal`] compares and hashes by value
+
+There are four type aliases provided for convenience:
+
+|                    |Non-thread-safe|Thread-safe  |
+|--------------------|---------------|-------------|
+|Compare by reference|[`UnsyncByRef`]|[`SyncByRef`]|
+|Compare by value    |[`UnsyncByVal`]|[`SyncByVal`]|
+
+# Example
+```
+use our::*;
+
+// `SyncByRef` is a thread-safe shared value with by-reference comparison and hashing.
+let mut a = SyncByRef::new(0);
+let mut b = a.clone();
+std::thread::spawn(move || b.set(1)).join().unwrap();
+assert_eq!(a.get(), 1);
+let c = SyncByRef::new(1);
+assert_ne!(a, c); // Notice that while while `a` and `c` both equal `1`,
+                  // they do not compare equal because they are different
+                  // pointers.
+
+// `UnsyncByVal` is a non-thread-safe shared value with by-value comparison and hashing.
+let a = UnsyncByVal::new(5);
+let b = UnsyncByVal::new(5);
+assert_eq!(a, b); // Notice that `a` and `b` compare equal
+                  // even though they are different pointers.
+```
+*/
+
 use std::{
     borrow::{Borrow, BorrowMut},
     cell::{Ref, RefCell, RefMut},
@@ -13,20 +64,34 @@ use std::{
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-pub type Mrc<T, E = ByRef> = Shared<T, ShareUnsync, E>;
-pub type Marc<T, E = ByRef> = Shared<T, ShareSync, E>;
+/// A non-thread-safe shared value with by-reference comparison and hashing
+pub type UnsyncByRef<T> = Shared<T, ShareUnsync, ByRef>;
+/// A thread-safe shared value with by-reference comparison and hashing
+pub type SyncByRef<T> = Shared<T, ShareSync, ByRef>;
+/// A non-thread-safe shared value with by-value comparison and hashing
+pub type UnsyncByVal<T> = Shared<T, ShareUnsync, ByVal>;
+/// A thread-safe shared value with by-value comparison and hashing
+pub type SyncByVal<T> = Shared<T, ShareSync, ByVal>;
 
+/// A way of comparing two shared value for equality
 pub trait EqualityKind<T> {
+    /// Compare two shared values for equality
     fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> bool;
 }
+/// A way of comparing two shared value for ordering
 pub trait CompareKind<T>: EqualityKind<T> {
+    /// Compare two shared values for ordering
     fn cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> Ordering;
 }
+/// A way of hashing a shared value
 pub trait HashKind<T> {
+    /// Hash a shared value
     fn hash<S: ShareKind, H: Hasher>(inner: &S::Inner<T>, state: &mut H);
 }
 
+/// Compare and hash shared values by reference
 pub struct ByRef;
+/// Compare and hash shared values by value
 pub struct ByVal;
 
 impl<T> EqualityKind<T> for ByRef {
@@ -61,21 +126,35 @@ impl<T: Hash> HashKind<T> for ByVal {
     }
 }
 
+/// A way of constructing and accessing shared mutable state
 pub trait ShareKind {
+    /// The inner wrapper, usually a smart pointer wrapping something with interior mutability
     type Inner<T>: Clone;
+    /// A read-only guard to the value
     type ReadGuard<'a, T: 'a>: Deref<Target = T>;
+    /// A read-write guard to the value
     type WriteGuard<'a, T: 'a>: DerefMut<Target = T>;
+    /// Make a new inner value
     fn make<T>(t: T) -> Self::Inner<T>;
+    /// Get a read-only guard to the value
     fn read<T>(inner: &Self::Inner<T>) -> Self::ReadGuard<'_, T>;
+    /// Get a read-write guard to the value
     fn write<T>(inner: &mut Self::Inner<T>) -> Self::WriteGuard<'_, T>;
+    /// Try to get a read-only guard to the value
     fn try_read<T>(inner: &Self::Inner<T>) -> Option<Self::ReadGuard<'_, T>>;
+    /// Try to get a read-write guard to the value
     fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>>;
+    /// Get a mutable reference to the value, cloning it if necessary
     fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T;
+    /// Compare two inner values for pointer equality
     fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool;
+    /// Compare two inner values for pointer ordering
     fn ptr_cmp<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> Ordering;
+    /// Hash an inner value by pointer
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H);
 }
 
+/// A non-thread-safe [`ShareKind`]
 pub struct ShareUnsync;
 
 impl ShareKind for ShareUnsync {
@@ -111,6 +190,7 @@ impl ShareKind for ShareUnsync {
     }
 }
 
+/// A thread-safe [`ShareKind`]
 pub struct ShareSync;
 
 impl ShareKind for ShareSync {
@@ -152,6 +232,18 @@ impl ShareKind for ShareSync {
     }
 }
 
+/// A shared, mutable value
+///
+/// The implementation can be chosen with the `S` [`ShareKind`] type parameter.
+/// This crate provides [`ShareUnsync`] for non-thread-safe sharing
+/// and [`ShareSync`] for thread-safe sharing.
+///
+/// The `E` type parameter determines how the value is compared and hashed.
+/// This crate provides [`ByRef`] for comparing and hashing by reference
+/// and [`ByVal`] for comparing and hashing by value.
+///
+/// See also [`Mrc`] and [`Marc`], which a convenient aliases for `Shared`
+/// which use [`ByRef`] by default.
 pub struct Shared<T, S: ShareKind, E = ByRef>(S::Inner<T>, PhantomData<E>);
 
 impl<T, S: ShareKind, E> From<T> for Shared<T, S, E> {
@@ -161,36 +253,53 @@ impl<T, S: ShareKind, E> From<T> for Shared<T, S, E> {
 }
 
 impl<T, S: ShareKind> Shared<T, S, ByRef> {
+    /// Create a new shared value that compares and hashes by reference
     pub fn new_by_ref(t: T) -> Self {
         Shared::new(t)
     }
 }
 
 impl<T, S: ShareKind> Shared<T, S, ByVal> {
+    /// Create a new shared value that compares and hashes by value
     pub fn new_by_val(t: T) -> Self {
         Shared::new(t)
     }
 }
 
 impl<T, S: ShareKind, E> Shared<T, S, E> {
+    /// Create a new shared value
     pub fn new(t: T) -> Self {
         Shared(S::make(t), PhantomData)
     }
+    /// Get a read guard to the value
     pub fn get(&self) -> ReadGuard<T, S> {
         ReadGuard(S::read(&self.0))
     }
+    /// Get a write guard to the value
     pub fn get_mut(&mut self) -> WriteGuard<T, S> {
         WriteGuard(S::write(&mut self.0))
     }
+    /// Try to get a read guard to the value
+    ///
+    /// Returns `None` if a write guard is currently held
     pub fn try_get(&self) -> Option<ReadGuard<T, S>> {
         S::try_read(&self.0).map(ReadGuard)
     }
+    /// Try to get a write guard to the value
+    ///
+    /// Returns `None` if a read or write guard is currently held
     pub fn try_get_mut(&mut self) -> Option<WriteGuard<T, S>> {
         S::try_write(&mut self.0).map(WriteGuard)
     }
+    /// Set the value
     pub fn set(&mut self, t: T) {
         *self.get_mut() = t;
     }
+    /// Try to set the value
+    ///
+    /// Fails if a read or write guard is currently held
+    ///
+    /// Returns whether the value was set
     pub fn try_set(&mut self, t: T) -> bool {
         if let Some(mut guard) = self.try_get_mut() {
             *guard = t;
@@ -199,29 +308,44 @@ impl<T, S: ShareKind, E> Shared<T, S, E> {
             false
         }
     }
+    /// Get a mutable reference to the value, cloning if a guard is held
     pub fn make_mut(&mut self) -> &mut T
     where
         T: Clone,
     {
         S::make_mut(&mut self.0)
     }
+    /// Copy out the value
     pub fn copied(&self) -> T
     where
         T: Copy,
     {
         *self.get()
     }
+    /// Clone out the value
     pub fn cloned(&self) -> T
     where
         T: Clone,
     {
         self.get().clone()
     }
+    /// Get a read guard and apply a function to the value
+    ///
+    /// Useful for one-liners
     pub fn bind<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&T) -> R,
     {
         f(&self.get())
+    }
+    /// Get a write guard and apply a function to the value
+    ///
+    /// Useful for one-liners
+    pub fn bind_mut<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        f(&mut self.get_mut())
     }
 }
 
@@ -306,7 +430,13 @@ impl<T, S: ShareKind, E: HashKind<T>> Hash for Shared<T, S, E> {
     }
 }
 
+/// A guard that allows read-only access to a shared value
+///
+/// Guards in this crate always compare and hash by value
 pub struct ReadGuard<'a, T: 'a, K: ShareKind>(K::ReadGuard<'a, T>);
+/// A guard that allows read-write access to a shared value
+///
+/// Guards in this crate always compare and hash by value
 pub struct WriteGuard<'a, T: 'a, K: ShareKind>(K::WriteGuard<'a, T>);
 
 macro_rules! guard_impl {
@@ -415,12 +545,12 @@ mod test {
 
     #[test]
     fn equality() {
-        let a = Mrc::new_by_ref(1);
-        let b = Mrc::new_by_ref(1);
+        let a = UnsyncByRef::new(1);
+        let b = UnsyncByRef::new(1);
         assert_ne!(a, b);
 
-        let a = Mrc::new_by_val(1);
-        let b = Mrc::new_by_val(1);
+        let a = UnsyncByVal::new_by_val(1);
+        let b = UnsyncByVal::new_by_val(1);
         assert_eq!(a, b);
     }
 }
