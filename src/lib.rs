@@ -83,6 +83,15 @@ pub type UnsyncByVal<T> = Shared<T, ShareUnsync, ByVal>;
 /// A thread-safe shared value with by-value comparison and hashing
 pub type SyncByVal<T> = Shared<T, ShareSync, ByVal>;
 
+/// A thread-safe read guard
+pub type SyncReadGuard<'a, T> = ReadGuard<'a, T, GuardSync>;
+/// A thread-safe write guard
+pub type SyncWriteGuard<'a, T> = WriteGuard<'a, T, GuardSync>;
+/// A non-thread-safe read guard
+pub type UnsyncReadGuard<'a, T> = ReadGuard<'a, T, GuardUnsync>;
+/// A non-thread-safe write guard
+pub type UnsyncWriteGuard<'a, T> = WriteGuard<'a, T, GuardUnsync>;
+
 /// A way of comparing two shared value for equality
 pub trait EqualityKind<T> {
     /// Compare two shared values for equality
