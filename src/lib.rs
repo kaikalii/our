@@ -16,20 +16,6 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub type Mrc<T, E = ByRef> = Shared<T, ShareUnsync, E>;
 pub type Marc<T, E = ByRef> = Shared<T, ShareSync, E>;
 
-pub trait ShareKind {
-    type Inner<T>: Clone;
-    type ReadGuard<'a, T: 'a>: Deref<Target = T>;
-    type WriteGuard<'a, T: 'a>: DerefMut<Target = T>;
-    fn make<T>(t: T) -> Self::Inner<T>;
-    fn read<T>(inner: &Self::Inner<T>) -> Self::ReadGuard<'_, T>;
-    fn write<T>(inner: &mut Self::Inner<T>) -> Self::WriteGuard<'_, T>;
-    fn try_read<T>(inner: &Self::Inner<T>) -> Option<Self::ReadGuard<'_, T>>;
-    fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>>;
-    fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool;
-    fn ptr_cmp<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> Ordering;
-    fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H);
-}
-
 pub trait EqualityKind<T> {
     fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> bool;
 }
@@ -75,6 +61,21 @@ impl<T: Hash> HashKind<T> for ByVal {
     }
 }
 
+pub trait ShareKind {
+    type Inner<T>: Clone;
+    type ReadGuard<'a, T: 'a>: Deref<Target = T>;
+    type WriteGuard<'a, T: 'a>: DerefMut<Target = T>;
+    fn make<T>(t: T) -> Self::Inner<T>;
+    fn read<T>(inner: &Self::Inner<T>) -> Self::ReadGuard<'_, T>;
+    fn write<T>(inner: &mut Self::Inner<T>) -> Self::WriteGuard<'_, T>;
+    fn try_read<T>(inner: &Self::Inner<T>) -> Option<Self::ReadGuard<'_, T>>;
+    fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>>;
+    fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T;
+    fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool;
+    fn ptr_cmp<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> Ordering;
+    fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H);
+}
+
 pub struct ShareUnsync;
 
 impl ShareKind for ShareUnsync {
@@ -95,6 +96,9 @@ impl ShareKind for ShareUnsync {
     }
     fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>> {
         inner.try_borrow_mut().ok()
+    }
+    fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T {
+        Rc::make_mut(inner).get_mut()
     }
     fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool {
         Rc::ptr_eq(a, b)
@@ -127,6 +131,15 @@ impl ShareKind for ShareSync {
     }
     fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>> {
         inner.try_write()
+    }
+    fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T {
+        if Arc::get_mut(inner).is_none() {
+            let value = inner.read().clone();
+            *inner = Arc::new(RwLock::new(value));
+        }
+        Arc::get_mut(inner)
+            .expect("the Arc was just created")
+            .get_mut()
     }
     fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool {
         Arc::ptr_eq(a, b)
@@ -185,6 +198,12 @@ impl<T, S: ShareKind, E> Shared<T, S, E> {
         } else {
             false
         }
+    }
+    pub fn make_mut(&mut self) -> &mut T
+    where
+        T: Clone,
+    {
+        S::make_mut(&mut self.0)
     }
     pub fn copied(&self) -> T
     where
