@@ -158,8 +158,18 @@ pub trait ShareKind {
     fn try_read<T>(inner: &Self::Inner<T>) -> Option<Self::ReadGuard<'_, T>>;
     /// Try to get a read-write guard to the value
     fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>>;
+    /// Try to get a mutable reference to the value
+    ///
+    /// Should return `None` if clones exist or a guard is held
+    fn as_mut<T>(inner: &mut Self::Inner<T>) -> Option<&mut T>;
     /// Get a mutable reference to the value, cloning it if necessary
-    fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T;
+    fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T {
+        if Self::as_mut(inner).is_none() {
+            let value = Self::read(inner).clone();
+            *inner = Self::make(value);
+        }
+        Self::as_mut(inner).unwrap()
+    }
     /// Compare two inner values for pointer equality
     fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool;
     /// Compare two inner values for pointer ordering
@@ -211,6 +221,9 @@ impl ShareKind for ShareUnsync {
     }
     fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>> {
         inner.try_borrow_mut().ok()
+    }
+    fn as_mut<T>(inner: &mut Self::Inner<T>) -> Option<&mut T> {
+        Rc::get_mut(inner).map(RefCell::get_mut)
     }
     fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T {
         Rc::make_mut(inner).get_mut()
@@ -274,14 +287,8 @@ impl ShareKind for ShareSync {
     fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>> {
         inner.try_write()
     }
-    fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T {
-        if Arc::get_mut(inner).is_none() {
-            let value = inner.read().clone();
-            *inner = Arc::new(RwLock::new(value));
-        }
-        Arc::get_mut(inner)
-            .expect("the Arc was just created")
-            .get_mut()
+    fn as_mut<T>(inner: &mut Self::Inner<T>) -> Option<&mut T> {
+        Arc::get_mut(inner).map(RwLock::get_mut)
     }
     fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool {
         Arc::ptr_eq(a, b)
@@ -420,6 +427,12 @@ impl<T, S: ShareKind, E> Shared<T, S, E> {
     {
         self.get().clone()
     }
+    /// Try to get a mutable reference to the value
+    ///
+    /// Returns `None` if clones exist or a guard is held
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        S::as_mut(&mut self.0)
+    }
     /// Get a read guard and apply a function to the value
     ///
     /// Useful for one-liners
@@ -432,11 +445,18 @@ impl<T, S: ShareKind, E> Shared<T, S, E> {
     /// Get a write guard and apply a function to the value
     ///
     /// Useful for one-liners
+    ///
+    /// This function does not acquire a lock if there are no
+    /// clones or guards
     pub fn bind_mut<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut T) -> R,
     {
-        f(&mut self.get_mut())
+        if let Some(value) = self.as_mut() {
+            f(value)
+        } else {
+            f(&mut self.get_mut())
+        }
     }
 }
 
@@ -716,5 +736,34 @@ mod test {
         drop(s);
 
         assert_eq!(foo.get().s, "world");
+    }
+
+    #[test]
+    fn as_mut() {
+        let mut x = UnsyncByRef::new(1);
+        *x.as_mut().unwrap() += 1;
+        assert_eq!(x.get(), 2);
+
+        let _y = x.clone();
+        assert!(x.as_mut().is_none());
+    }
+
+    #[test]
+    fn bind() {
+        let mut x = UnsyncByRef::new(1);
+        let y = x.bind_mut(|x| {
+            *x += 1;
+            *x * *x
+        });
+        assert_eq!(x.get(), 2);
+        assert_eq!(y, 4);
+
+        let _x2 = x.clone();
+        let y = x.bind_mut(|x| {
+            *x += 1;
+            *x * *x
+        });
+        assert_eq!(x.get(), 3);
+        assert_eq!(y, 9);
     }
 }
