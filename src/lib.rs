@@ -136,28 +136,117 @@ impl<T: Hash> HashKind<T> for ByVal {
     }
 }
 
+/// A family of guards
+pub trait GuardKind {
+    /// The type of the read-only guard
+    type ReadGuard<'a, T: 'a>: Deref<Target = T>;
+    /// The type of the read-write guard
+    type WriteGuard<'a, T: 'a>: DerefMut<Target = T>;
+    /// Map a read guard to guard an inner value
+    fn map_read<T, U, F: FnOnce(&T) -> &U>(
+        guard: Self::ReadGuard<'_, T>,
+        f: F,
+    ) -> Self::ReadGuard<'_, U>;
+    /// Map a write guard to guard an inner value
+    fn map_write<T, U, F: FnOnce(&mut T) -> &mut U>(
+        guard: Self::WriteGuard<'_, T>,
+        f: F,
+    ) -> Self::WriteGuard<'_, U>;
+    /// Filter map a read guard to guard an inner value
+    fn filter_map_read<T, U, F: FnOnce(&T) -> Option<&U>>(
+        guard: Self::ReadGuard<'_, T>,
+        f: F,
+    ) -> Result<Self::ReadGuard<'_, U>, Self::ReadGuard<'_, T>>;
+    /// Filter map a write guard to guard an inner value
+    fn filter_map_write<T, U, F: FnOnce(&mut T) -> Option<&mut U>>(
+        guard: Self::WriteGuard<'_, T>,
+        f: F,
+    ) -> Result<Self::WriteGuard<'_, U>, Self::WriteGuard<'_, T>>;
+}
+
+/// A non-thread-safe [`GuardKind`]
+pub struct GuardUnsync;
+/// A thread-safe guard [`GuardKind`]
+pub struct GuardSync;
+
+impl GuardKind for GuardUnsync {
+    type ReadGuard<'a, T: 'a> = Ref<'a, T>;
+    type WriteGuard<'a, T: 'a> = RefMut<'a, T>;
+    fn map_read<T, U, F: FnOnce(&T) -> &U>(
+        guard: Self::ReadGuard<'_, T>,
+        f: F,
+    ) -> Self::ReadGuard<'_, U> {
+        Ref::map(guard, f)
+    }
+    fn map_write<T, U, F: FnOnce(&mut T) -> &mut U>(
+        guard: Self::WriteGuard<'_, T>,
+        f: F,
+    ) -> Self::WriteGuard<'_, U> {
+        RefMut::map(guard, f)
+    }
+    fn filter_map_read<T, U, F: FnOnce(&T) -> Option<&U>>(
+        guard: Self::ReadGuard<'_, T>,
+        f: F,
+    ) -> Result<Self::ReadGuard<'_, U>, Self::ReadGuard<'_, T>> {
+        Ref::filter_map(guard, f)
+    }
+    fn filter_map_write<T, U, F: FnOnce(&mut T) -> Option<&mut U>>(
+        guard: Self::WriteGuard<'_, T>,
+        f: F,
+    ) -> Result<Self::WriteGuard<'_, U>, Self::WriteGuard<'_, T>> {
+        RefMut::filter_map(guard, f)
+    }
+}
+
+impl GuardKind for GuardSync {
+    type ReadGuard<'a, T: 'a> = MappedRwLockReadGuard<'a, T>;
+    type WriteGuard<'a, T: 'a> = MappedRwLockWriteGuard<'a, T>;
+    fn map_read<T, U, F: FnOnce(&T) -> &U>(
+        guard: Self::ReadGuard<'_, T>,
+        f: F,
+    ) -> Self::ReadGuard<'_, U> {
+        MappedRwLockReadGuard::map(guard, f)
+    }
+    fn map_write<T, U, F: FnOnce(&mut T) -> &mut U>(
+        guard: Self::WriteGuard<'_, T>,
+        f: F,
+    ) -> Self::WriteGuard<'_, U> {
+        MappedRwLockWriteGuard::map(guard, f)
+    }
+    fn filter_map_read<T, U, F: FnOnce(&T) -> Option<&U>>(
+        guard: Self::ReadGuard<'_, T>,
+        f: F,
+    ) -> Result<Self::ReadGuard<'_, U>, Self::ReadGuard<'_, T>> {
+        MappedRwLockReadGuard::try_map(guard, f)
+    }
+    fn filter_map_write<T, U, F: FnOnce(&mut T) -> Option<&mut U>>(
+        guard: Self::WriteGuard<'_, T>,
+        f: F,
+    ) -> Result<Self::WriteGuard<'_, U>, Self::WriteGuard<'_, T>> {
+        MappedRwLockWriteGuard::try_map(guard, f)
+    }
+}
+
 /// A way of constructing and accessing shared mutable state
 pub trait ShareKind {
     /// The inner wrapper, usually a smart pointer wrapping something with interior mutability
     type Inner<T>: Clone;
-    /// A read-only guard to the value
-    type ReadGuard<'a, T: 'a>: Deref<Target = T>;
-    /// A read-write guard to the value
-    type WriteGuard<'a, T: 'a>: DerefMut<Target = T>;
-    /// A read-only guard to the value, mapped from another read guard
-    type MappedReadGuard<'a, T: 'a>: Deref<Target = T>;
-    /// A read-write guard to the value, mapped from another read-write guard
-    type MappedWriteGuard<'a, T: 'a>: DerefMut<Target = T>;
+    /// The guard kind
+    type GuardKind: GuardKind;
     /// Make a new inner value
     fn make<T>(t: T) -> Self::Inner<T>;
     /// Get a read-only guard to the value
-    fn read<T>(inner: &Self::Inner<T>) -> Self::ReadGuard<'_, T>;
+    fn read<T>(inner: &Self::Inner<T>) -> <Self::GuardKind as GuardKind>::ReadGuard<'_, T>;
     /// Get a read-write guard to the value
-    fn write<T>(inner: &mut Self::Inner<T>) -> Self::WriteGuard<'_, T>;
+    fn write<T>(inner: &mut Self::Inner<T>) -> <Self::GuardKind as GuardKind>::WriteGuard<'_, T>;
     /// Try to get a read-only guard to the value
-    fn try_read<T>(inner: &Self::Inner<T>) -> Option<Self::ReadGuard<'_, T>>;
+    fn try_read<T>(
+        inner: &Self::Inner<T>,
+    ) -> Option<<Self::GuardKind as GuardKind>::ReadGuard<'_, T>>;
     /// Try to get a read-write guard to the value
-    fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>>;
+    fn try_write<T>(
+        inner: &mut Self::Inner<T>,
+    ) -> Option<<Self::GuardKind as GuardKind>::WriteGuard<'_, T>>;
     /// Try to get a mutable reference to the value
     ///
     /// Should return `None` if clones exist or a guard is held
@@ -176,26 +265,6 @@ pub trait ShareKind {
     fn ptr_cmp<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> Ordering;
     /// Hash an inner value by pointer
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H);
-    /// Map a read guard to guard an inner value
-    fn map_read<T, U, F: FnOnce(&T) -> &U>(
-        guard: Self::ReadGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedReadGuard<'_, U>;
-    /// Map a write guard to guard an inner value
-    fn map_write<T, U, F: FnOnce(&mut T) -> &mut U>(
-        guard: Self::WriteGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedWriteGuard<'_, U>;
-    /// Map a mapped read guard to guard an inner value
-    fn map_mapped_read<T, U, F: FnOnce(&T) -> &U>(
-        guard: Self::MappedReadGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedReadGuard<'_, U>;
-    /// Map a mapped write guard to guard an inner value
-    fn map_mapped_write<T, U, F: FnOnce(&mut T) -> &mut U>(
-        guard: Self::MappedWriteGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedWriteGuard<'_, U>;
 }
 
 /// A non-thread-safe [`ShareKind`]
@@ -203,23 +272,24 @@ pub struct ShareUnsync;
 
 impl ShareKind for ShareUnsync {
     type Inner<T> = Rc<RefCell<T>>;
-    type ReadGuard<'a, T: 'a> = Ref<'a, T>;
-    type WriteGuard<'a, T: 'a> = RefMut<'a, T>;
-    type MappedReadGuard<'a, T: 'a> = Ref<'a, T>;
-    type MappedWriteGuard<'a, T: 'a> = RefMut<'a, T>;
+    type GuardKind = GuardUnsync;
     fn make<T>(t: T) -> Self::Inner<T> {
         Rc::new(RefCell::new(t))
     }
-    fn read<T>(inner: &Self::Inner<T>) -> Self::ReadGuard<'_, T> {
+    fn read<T>(inner: &Self::Inner<T>) -> <Self::GuardKind as GuardKind>::ReadGuard<'_, T> {
         RefCell::borrow(inner)
     }
-    fn write<T>(inner: &mut Self::Inner<T>) -> Self::WriteGuard<'_, T> {
+    fn write<T>(inner: &mut Self::Inner<T>) -> <Self::GuardKind as GuardKind>::WriteGuard<'_, T> {
         RefCell::borrow_mut(inner)
     }
-    fn try_read<T>(inner: &Self::Inner<T>) -> Option<Self::ReadGuard<'_, T>> {
+    fn try_read<T>(
+        inner: &Self::Inner<T>,
+    ) -> Option<<Self::GuardKind as GuardKind>::ReadGuard<'_, T>> {
         inner.try_borrow().ok()
     }
-    fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>> {
+    fn try_write<T>(
+        inner: &mut Self::Inner<T>,
+    ) -> Option<<Self::GuardKind as GuardKind>::WriteGuard<'_, T>> {
         inner.try_borrow_mut().ok()
     }
     fn as_mut<T>(inner: &mut Self::Inner<T>) -> Option<&mut T> {
@@ -237,30 +307,6 @@ impl ShareKind for ShareUnsync {
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H) {
         ptr::hash(Rc::as_ptr(inner), state);
     }
-    fn map_read<T, U, F: FnOnce(&T) -> &U>(
-        guard: Self::ReadGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedReadGuard<'_, U> {
-        Ref::map(guard, f)
-    }
-    fn map_write<T, U, F: FnOnce(&mut T) -> &mut U>(
-        guard: Self::WriteGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedWriteGuard<'_, U> {
-        RefMut::map(guard, f)
-    }
-    fn map_mapped_read<T, U, F: FnOnce(&T) -> &U>(
-        guard: Self::MappedReadGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedReadGuard<'_, U> {
-        Ref::map(guard, f)
-    }
-    fn map_mapped_write<T, U, F: FnOnce(&mut T) -> &mut U>(
-        guard: Self::MappedWriteGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedWriteGuard<'_, U> {
-        RefMut::map(guard, f)
-    }
 }
 
 /// A thread-safe [`ShareKind`]
@@ -268,24 +314,25 @@ pub struct ShareSync;
 
 impl ShareKind for ShareSync {
     type Inner<T> = Arc<RwLock<T>>;
-    type ReadGuard<'a, T: 'a> = RwLockReadGuard<'a, T>;
-    type WriteGuard<'a, T: 'a> = RwLockWriteGuard<'a, T>;
-    type MappedReadGuard<'a, T: 'a> = MappedRwLockReadGuard<'a, T>;
-    type MappedWriteGuard<'a, T: 'a> = MappedRwLockWriteGuard<'a, T>;
+    type GuardKind = GuardSync;
     fn make<T>(t: T) -> Self::Inner<T> {
         Arc::new(RwLock::new(t))
     }
-    fn read<T>(inner: &Self::Inner<T>) -> Self::ReadGuard<'_, T> {
-        inner.read()
+    fn read<T>(inner: &Self::Inner<T>) -> <Self::GuardKind as GuardKind>::ReadGuard<'_, T> {
+        RwLockReadGuard::map(inner.read(), |x| x)
     }
-    fn write<T>(inner: &mut Self::Inner<T>) -> Self::WriteGuard<'_, T> {
-        inner.write()
+    fn write<T>(inner: &mut Self::Inner<T>) -> <Self::GuardKind as GuardKind>::WriteGuard<'_, T> {
+        RwLockWriteGuard::map(inner.write(), |x| x)
     }
-    fn try_read<T>(inner: &Self::Inner<T>) -> Option<Self::ReadGuard<'_, T>> {
-        inner.try_read()
+    fn try_read<T>(
+        inner: &Self::Inner<T>,
+    ) -> Option<<Self::GuardKind as GuardKind>::ReadGuard<'_, T>> {
+        inner.try_read().map(|x| RwLockReadGuard::map(x, |x| x))
     }
-    fn try_write<T>(inner: &mut Self::Inner<T>) -> Option<Self::WriteGuard<'_, T>> {
-        inner.try_write()
+    fn try_write<T>(
+        inner: &mut Self::Inner<T>,
+    ) -> Option<<Self::GuardKind as GuardKind>::WriteGuard<'_, T>> {
+        inner.try_write().map(|x| RwLockWriteGuard::map(x, |x| x))
     }
     fn as_mut<T>(inner: &mut Self::Inner<T>) -> Option<&mut T> {
         Arc::get_mut(inner).map(RwLock::get_mut)
@@ -298,30 +345,6 @@ impl ShareKind for ShareSync {
     }
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H) {
         ptr::hash(Arc::as_ptr(inner), state);
-    }
-    fn map_read<T, U, F: FnOnce(&T) -> &U>(
-        guard: Self::ReadGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedReadGuard<'_, U> {
-        RwLockReadGuard::map(guard, f)
-    }
-    fn map_write<T, U, F: FnOnce(&mut T) -> &mut U>(
-        guard: Self::WriteGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedWriteGuard<'_, U> {
-        RwLockWriteGuard::map(guard, f)
-    }
-    fn map_mapped_read<T, U, F: FnOnce(&T) -> &U>(
-        guard: Self::MappedReadGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedReadGuard<'_, U> {
-        MappedRwLockReadGuard::map(guard, f)
-    }
-    fn map_mapped_write<T, U, F: FnOnce(&mut T) -> &mut U>(
-        guard: Self::MappedWriteGuard<'_, T>,
-        f: F,
-    ) -> Self::MappedWriteGuard<'_, U> {
-        MappedRwLockWriteGuard::map(guard, f)
     }
 }
 
@@ -370,23 +393,23 @@ impl<T, S: ShareKind, E> Shared<T, S, E> {
         Shared(S::make(t), PhantomData)
     }
     /// Get a read guard to the value
-    pub fn get(&self) -> ReadGuard<T, S> {
+    pub fn get(&self) -> ReadGuard<T, S::GuardKind> {
         ReadGuard(S::read(&self.0))
     }
     /// Get a write guard to the value
-    pub fn get_mut(&mut self) -> WriteGuard<T, S> {
+    pub fn get_mut(&mut self) -> WriteGuard<T, S::GuardKind> {
         WriteGuard(S::write(&mut self.0))
     }
     /// Try to get a read guard to the value
     ///
     /// Returns `None` if a write guard is currently held
-    pub fn try_get(&self) -> Option<ReadGuard<T, S>> {
+    pub fn try_get(&self) -> Option<ReadGuard<T, S::GuardKind>> {
         S::try_read(&self.0).map(ReadGuard)
     }
     /// Try to get a write guard to the value
     ///
     /// Returns `None` if a read or write guard is currently held
-    pub fn try_get_mut(&mut self) -> Option<WriteGuard<T, S>> {
+    pub fn try_get_mut(&mut self) -> Option<WriteGuard<T, S::GuardKind>> {
         S::try_write(&mut self.0).map(WriteGuard)
     }
     /// Set the value
@@ -550,98 +573,90 @@ impl<T, S: ShareKind, E: HashKind<T>> Hash for Shared<T, S, E> {
 /// A guard that allows read-only access to a shared value
 ///
 /// Guards in this crate always compare and hash by value
-pub struct ReadGuard<'a, T: 'a, K: ShareKind>(K::ReadGuard<'a, T>);
+pub struct ReadGuard<'a, T: 'a, G: GuardKind>(G::ReadGuard<'a, T>);
 /// A guard that allows read-write access to a shared value
 ///
 /// Guards in this crate always compare and hash by value
-pub struct WriteGuard<'a, T: 'a, K: ShareKind>(K::WriteGuard<'a, T>);
-/// A guard that allows read-only access to a shared value
-///
-/// Mapped from a [`ReadGuard`]
-pub struct MappedReadGuard<'a, T: 'a, K: ShareKind>(K::MappedReadGuard<'a, T>);
-/// A guard that allows read-write access to a shared value
-///
-/// Mapped from a [`WriteGuard`]
-pub struct MappedWriteGuard<'a, T: 'a, K: ShareKind>(K::MappedWriteGuard<'a, T>);
+pub struct WriteGuard<'a, T: 'a, G: GuardKind>(G::WriteGuard<'a, T>);
 
 macro_rules! guard_impl {
     ($ty:ident) => {
-        impl<'a, T, K: ShareKind> Deref for $ty<'a, T, K> {
+        impl<'a, T, G: GuardKind> Deref for $ty<'a, T, G> {
             type Target = T;
             fn deref(&self) -> &T {
                 self.0.deref()
             }
         }
 
-        impl<'a, T: fmt::Debug, K: ShareKind> fmt::Debug for $ty<'a, T, K> {
+        impl<'a, T: fmt::Debug, G: GuardKind> fmt::Debug for $ty<'a, T, G> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 self.deref().fmt(f)
             }
         }
 
-        impl<'a, T: fmt::Display, K: ShareKind> fmt::Display for $ty<'a, T, K> {
+        impl<'a, T: fmt::Display, G: GuardKind> fmt::Display for $ty<'a, T, G> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 self.deref().fmt(f)
             }
         }
 
-        impl<'a, T: PartialEq, K: ShareKind> PartialEq for $ty<'a, T, K> {
+        impl<'a, T: PartialEq, G: GuardKind> PartialEq for $ty<'a, T, G> {
             fn eq(&self, other: &Self) -> bool {
                 self.deref().eq(other.deref())
             }
         }
 
-        impl<'a, 'b, T: PartialEq, K: ShareKind> PartialEq<&'b Self> for $ty<'a, T, K> {
+        impl<'a, 'b, T: PartialEq, G: GuardKind> PartialEq<&'b Self> for $ty<'a, T, G> {
             fn eq(&self, other: &&'b Self) -> bool {
                 self.deref().eq(other.deref())
             }
         }
 
-        impl<'a, T: PartialEq, K: ShareKind> PartialEq<T> for $ty<'a, T, K> {
+        impl<'a, T: PartialEq, G: GuardKind> PartialEq<T> for $ty<'a, T, G> {
             fn eq(&self, other: &T) -> bool {
                 self.deref().eq(other)
             }
         }
 
-        impl<'a, K: ShareKind> PartialEq<str> for $ty<'a, String, K> {
+        impl<'a, G: GuardKind> PartialEq<str> for $ty<'a, String, G> {
             fn eq(&self, other: &str) -> bool {
                 self.deref().eq(other)
             }
         }
 
-        impl<'a, 'b, K: ShareKind> PartialEq<&'b str> for $ty<'a, String, K> {
+        impl<'a, 'b, G: GuardKind> PartialEq<&'b str> for $ty<'a, String, G> {
             fn eq(&self, other: &&'b str) -> bool {
                 self.deref().eq(other)
             }
         }
 
-        impl<'a, T: Eq, K: ShareKind> Eq for $ty<'a, T, K> {}
+        impl<'a, T: Eq, G: GuardKind> Eq for $ty<'a, T, G> {}
 
-        impl<'a, T: PartialOrd, K: ShareKind> PartialOrd for $ty<'a, T, K> {
+        impl<'a, T: PartialOrd, G: GuardKind> PartialOrd for $ty<'a, T, G> {
             fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                 self.deref().partial_cmp(other.deref())
             }
         }
 
-        impl<'a, T: Ord, K: ShareKind> Ord for $ty<'a, T, K> {
+        impl<'a, T: Ord, G: GuardKind> Ord for $ty<'a, T, G> {
             fn cmp(&self, other: &Self) -> Ordering {
                 self.deref().cmp(other.deref())
             }
         }
 
-        impl<'a, T: Hash, K: ShareKind> Hash for $ty<'a, T, K> {
+        impl<'a, T: Hash, G: GuardKind> Hash for $ty<'a, T, G> {
             fn hash<H: Hasher>(&self, state: &mut H) {
                 self.deref().hash(state)
             }
         }
 
-        impl<'a, T, K: ShareKind> AsRef<T> for $ty<'a, T, K> {
+        impl<'a, T, G: GuardKind> AsRef<T> for $ty<'a, T, G> {
             fn as_ref(&self) -> &T {
                 self.deref()
             }
         }
 
-        impl<'a, T, K: ShareKind> Borrow<T> for $ty<'a, T, K> {
+        impl<'a, T, G: GuardKind> Borrow<T> for $ty<'a, T, G> {
             fn borrow(&self) -> &T {
                 self.deref()
             }
@@ -651,70 +666,56 @@ macro_rules! guard_impl {
 
 guard_impl!(ReadGuard);
 guard_impl!(WriteGuard);
-guard_impl!(MappedReadGuard);
-guard_impl!(MappedWriteGuard);
 
-impl<'a, T, K: ShareKind> DerefMut for WriteGuard<'a, T, K> {
+impl<'a, T, G: GuardKind> DerefMut for WriteGuard<'a, T, G> {
     fn deref_mut(&mut self) -> &mut T {
         self.0.deref_mut()
     }
 }
 
-impl<'a, T, K: ShareKind> AsMut<T> for WriteGuard<'a, T, K> {
+impl<'a, T, G: GuardKind> AsMut<T> for WriteGuard<'a, T, G> {
     fn as_mut(&mut self) -> &mut T {
         self.deref_mut()
     }
 }
 
-impl<'a, T, K: ShareKind> BorrowMut<T> for WriteGuard<'a, T, K> {
+impl<'a, T, G: GuardKind> BorrowMut<T> for WriteGuard<'a, T, G> {
     fn borrow_mut(&mut self) -> &mut T {
         self.deref_mut()
     }
 }
 
-impl<'a, T, K: ShareKind> DerefMut for MappedWriteGuard<'a, T, K> {
-    fn deref_mut(&mut self) -> &mut T {
-        self.0.deref_mut()
-    }
-}
-
-impl<'a, T, K: ShareKind> AsMut<T> for MappedWriteGuard<'a, T, K> {
-    fn as_mut(&mut self) -> &mut T {
-        self.deref_mut()
-    }
-}
-
-impl<'a, T, K: ShareKind> BorrowMut<T> for MappedWriteGuard<'a, T, K> {
-    fn borrow_mut(&mut self) -> &mut T {
-        self.deref_mut()
-    }
-}
-
-impl<'a, T, K: ShareKind> ReadGuard<'a, T, K> {
+impl<'a, T, G: GuardKind> ReadGuard<'a, T, G> {
     /// Maps this guard to an inner value
-    pub fn map<U, F: FnOnce(&T) -> &U>(self, f: F) -> MappedReadGuard<'a, U, K> {
-        MappedReadGuard(K::map_read(self.0, f))
+    pub fn map<U, F: FnOnce(&T) -> &U>(self, f: F) -> ReadGuard<'a, U, G> {
+        ReadGuard(G::map_read(self.0, f))
+    }
+    /// Maps this guard to an inner value, or returns the original guard
+    /// if the mapping function returns `None`
+    pub fn filter_map<U, F: FnOnce(&T) -> Option<&U>>(
+        self,
+        f: F,
+    ) -> Result<ReadGuard<'a, U, G>, Self> {
+        G::filter_map_read(self.0, f)
+            .map(ReadGuard)
+            .map_err(ReadGuard)
     }
 }
 
-impl<'a, T, K: ShareKind> WriteGuard<'a, T, K> {
+impl<'a, T, G: GuardKind> WriteGuard<'a, T, G> {
     /// Maps this guard to an inner value
-    pub fn map<U, F: FnOnce(&mut T) -> &mut U>(self, f: F) -> MappedWriteGuard<'a, U, K> {
-        MappedWriteGuard(K::map_write(self.0, f))
+    pub fn map<U, F: FnOnce(&mut T) -> &mut U>(self, f: F) -> WriteGuard<'a, U, G> {
+        WriteGuard(G::map_write(self.0, f))
     }
-}
-
-impl<'a, T, K: ShareKind> MappedReadGuard<'a, T, K> {
-    /// Maps this guard to an inner value
-    pub fn map<U, F: FnOnce(&T) -> &U>(self, f: F) -> MappedReadGuard<'a, U, K> {
-        MappedReadGuard(K::map_mapped_read(self.0, f))
-    }
-}
-
-impl<'a, T, K: ShareKind> MappedWriteGuard<'a, T, K> {
-    /// Maps this guard to an inner value
-    pub fn map<U, F: FnOnce(&mut T) -> &mut U>(self, f: F) -> MappedWriteGuard<'a, U, K> {
-        MappedWriteGuard(K::map_mapped_write(self.0, f))
+    /// Maps this guard to an inner value, or returns the original guard
+    /// if the mapping function returns `None`
+    pub fn filter_map<U, F: FnOnce(&mut T) -> Option<&mut U>>(
+        self,
+        f: F,
+    ) -> Result<WriteGuard<'a, U, G>, Self> {
+        G::filter_map_write(self.0, f)
+            .map(WriteGuard)
+            .map_err(WriteGuard)
     }
 }
 
