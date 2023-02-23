@@ -70,7 +70,9 @@ use std::{
     sync::Arc,
 };
 
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{
+    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 
 /// A non-thread-safe shared value with by-reference comparison and hashing
 pub type UnsyncByRef<T> = Shared<T, ShareUnsync, ByRef>;
@@ -142,6 +144,10 @@ pub trait ShareKind {
     type ReadGuard<'a, T: 'a>: Deref<Target = T>;
     /// A read-write guard to the value
     type WriteGuard<'a, T: 'a>: DerefMut<Target = T>;
+    /// A read-only guard to the value, mapped from another read guard
+    type MappedReadGuard<'a, T: 'a>: Deref<Target = T>;
+    /// A read-write guard to the value, mapped from another read-write guard
+    type MappedWriteGuard<'a, T: 'a>: DerefMut<Target = T>;
     /// Make a new inner value
     fn make<T>(t: T) -> Self::Inner<T>;
     /// Get a read-only guard to the value
@@ -160,6 +166,26 @@ pub trait ShareKind {
     fn ptr_cmp<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> Ordering;
     /// Hash an inner value by pointer
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H);
+    /// Map a read guard to guard an inner value
+    fn map_read<T, U, F: FnOnce(&T) -> &U>(
+        guard: Self::ReadGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedReadGuard<'_, U>;
+    /// Map a write guard to guard an inner value
+    fn map_write<T, U, F: FnOnce(&mut T) -> &mut U>(
+        guard: Self::WriteGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedWriteGuard<'_, U>;
+    /// Map a mapped read guard to guard an inner value
+    fn map_mapped_read<T, U, F: FnOnce(&T) -> &U>(
+        guard: Self::MappedReadGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedReadGuard<'_, U>;
+    /// Map a mapped write guard to guard an inner value
+    fn map_mapped_write<T, U, F: FnOnce(&mut T) -> &mut U>(
+        guard: Self::MappedWriteGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedWriteGuard<'_, U>;
 }
 
 /// A non-thread-safe [`ShareKind`]
@@ -169,6 +195,8 @@ impl ShareKind for ShareUnsync {
     type Inner<T> = Rc<RefCell<T>>;
     type ReadGuard<'a, T: 'a> = Ref<'a, T>;
     type WriteGuard<'a, T: 'a> = RefMut<'a, T>;
+    type MappedReadGuard<'a, T: 'a> = Ref<'a, T>;
+    type MappedWriteGuard<'a, T: 'a> = RefMut<'a, T>;
     fn make<T>(t: T) -> Self::Inner<T> {
         Rc::new(RefCell::new(t))
     }
@@ -196,6 +224,30 @@ impl ShareKind for ShareUnsync {
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H) {
         ptr::hash(Rc::as_ptr(inner), state);
     }
+    fn map_read<T, U, F: FnOnce(&T) -> &U>(
+        guard: Self::ReadGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedReadGuard<'_, U> {
+        Ref::map(guard, f)
+    }
+    fn map_write<T, U, F: FnOnce(&mut T) -> &mut U>(
+        guard: Self::WriteGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedWriteGuard<'_, U> {
+        RefMut::map(guard, f)
+    }
+    fn map_mapped_read<T, U, F: FnOnce(&T) -> &U>(
+        guard: Self::MappedReadGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedReadGuard<'_, U> {
+        Ref::map(guard, f)
+    }
+    fn map_mapped_write<T, U, F: FnOnce(&mut T) -> &mut U>(
+        guard: Self::MappedWriteGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedWriteGuard<'_, U> {
+        RefMut::map(guard, f)
+    }
 }
 
 /// A thread-safe [`ShareKind`]
@@ -205,6 +257,8 @@ impl ShareKind for ShareSync {
     type Inner<T> = Arc<RwLock<T>>;
     type ReadGuard<'a, T: 'a> = RwLockReadGuard<'a, T>;
     type WriteGuard<'a, T: 'a> = RwLockWriteGuard<'a, T>;
+    type MappedReadGuard<'a, T: 'a> = MappedRwLockReadGuard<'a, T>;
+    type MappedWriteGuard<'a, T: 'a> = MappedRwLockWriteGuard<'a, T>;
     fn make<T>(t: T) -> Self::Inner<T> {
         Arc::new(RwLock::new(t))
     }
@@ -237,6 +291,30 @@ impl ShareKind for ShareSync {
     }
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H) {
         ptr::hash(Arc::as_ptr(inner), state);
+    }
+    fn map_read<T, U, F: FnOnce(&T) -> &U>(
+        guard: Self::ReadGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedReadGuard<'_, U> {
+        RwLockReadGuard::map(guard, f)
+    }
+    fn map_write<T, U, F: FnOnce(&mut T) -> &mut U>(
+        guard: Self::WriteGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedWriteGuard<'_, U> {
+        RwLockWriteGuard::map(guard, f)
+    }
+    fn map_mapped_read<T, U, F: FnOnce(&T) -> &U>(
+        guard: Self::MappedReadGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedReadGuard<'_, U> {
+        MappedRwLockReadGuard::map(guard, f)
+    }
+    fn map_mapped_write<T, U, F: FnOnce(&mut T) -> &mut U>(
+        guard: Self::MappedWriteGuard<'_, T>,
+        f: F,
+    ) -> Self::MappedWriteGuard<'_, U> {
+        MappedRwLockWriteGuard::map(guard, f)
     }
 }
 
@@ -451,6 +529,14 @@ pub struct ReadGuard<'a, T: 'a, K: ShareKind>(K::ReadGuard<'a, T>);
 ///
 /// Guards in this crate always compare and hash by value
 pub struct WriteGuard<'a, T: 'a, K: ShareKind>(K::WriteGuard<'a, T>);
+/// A guard that allows read-only access to a shared value
+///
+/// Mapped from a [`ReadGuard`]
+pub struct MappedReadGuard<'a, T: 'a, K: ShareKind>(K::MappedReadGuard<'a, T>);
+/// A guard that allows read-write access to a shared value
+///
+/// Mapped from a [`WriteGuard`]
+pub struct MappedWriteGuard<'a, T: 'a, K: ShareKind>(K::MappedWriteGuard<'a, T>);
 
 macro_rules! guard_impl {
     ($ty:ident) => {
@@ -533,6 +619,8 @@ macro_rules! guard_impl {
 
 guard_impl!(ReadGuard);
 guard_impl!(WriteGuard);
+guard_impl!(MappedReadGuard);
+guard_impl!(MappedWriteGuard);
 
 impl<'a, T, K: ShareKind> DerefMut for WriteGuard<'a, T, K> {
     fn deref_mut(&mut self) -> &mut T {
@@ -552,6 +640,52 @@ impl<'a, T, K: ShareKind> BorrowMut<T> for WriteGuard<'a, T, K> {
     }
 }
 
+impl<'a, T, K: ShareKind> DerefMut for MappedWriteGuard<'a, T, K> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.0.deref_mut()
+    }
+}
+
+impl<'a, T, K: ShareKind> AsMut<T> for MappedWriteGuard<'a, T, K> {
+    fn as_mut(&mut self) -> &mut T {
+        self.deref_mut()
+    }
+}
+
+impl<'a, T, K: ShareKind> BorrowMut<T> for MappedWriteGuard<'a, T, K> {
+    fn borrow_mut(&mut self) -> &mut T {
+        self.deref_mut()
+    }
+}
+
+impl<'a, T, K: ShareKind> ReadGuard<'a, T, K> {
+    /// Maps this guard to an inner value
+    pub fn map<U, F: FnOnce(&T) -> &U>(self, f: F) -> MappedReadGuard<'a, U, K> {
+        MappedReadGuard(K::map_read(self.0, f))
+    }
+}
+
+impl<'a, T, K: ShareKind> WriteGuard<'a, T, K> {
+    /// Maps this guard to an inner value
+    pub fn map<U, F: FnOnce(&mut T) -> &mut U>(self, f: F) -> MappedWriteGuard<'a, U, K> {
+        MappedWriteGuard(K::map_write(self.0, f))
+    }
+}
+
+impl<'a, T, K: ShareKind> MappedReadGuard<'a, T, K> {
+    /// Maps this guard to an inner value
+    pub fn map<U, F: FnOnce(&T) -> &U>(self, f: F) -> MappedReadGuard<'a, U, K> {
+        MappedReadGuard(K::map_mapped_read(self.0, f))
+    }
+}
+
+impl<'a, T, K: ShareKind> MappedWriteGuard<'a, T, K> {
+    /// Maps this guard to an inner value
+    pub fn map<U, F: FnOnce(&mut T) -> &mut U>(self, f: F) -> MappedWriteGuard<'a, U, K> {
+        MappedWriteGuard(K::map_mapped_write(self.0, f))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -565,5 +699,22 @@ mod test {
         let a = UnsyncByVal::new_by_val(1);
         let b = UnsyncByVal::new_by_val(1);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn map() {
+        struct Foo {
+            s: String,
+        }
+
+        let mut foo = UnsyncByRef::new(Foo {
+            s: "hello".to_string(),
+        });
+
+        let mut s = foo.get_mut().map(|f| &mut f.s);
+        *s = "world".to_string();
+        drop(s);
+
+        assert_eq!(foo.get().s, "world");
     }
 }
