@@ -296,6 +296,8 @@ pub trait ShareKind {
         }
         Self::as_mut(inner).unwrap()
     }
+    /// Try to unwrap the inner value
+    fn try_unwrap<T>(inner: Self::Inner<T>) -> Result<T, Self::Inner<T>>;
     /// Compare two inner values for pointer equality
     fn ptr_eq<T, U>(a: &Self::Inner<T>, b: &Self::Inner<U>) -> bool;
     /// Compare two inner values for pointer ordering
@@ -335,6 +337,9 @@ impl ShareKind for ShareUnsync {
     fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T {
         Rc::make_mut(inner).get_mut()
     }
+    fn try_unwrap<T>(inner: Self::Inner<T>) -> Result<T, Self::Inner<T>> {
+        Rc::try_unwrap(inner).map(RefCell::into_inner)
+    }
     fn ptr_eq<T, U>(a: &Self::Inner<T>, b: &Self::Inner<U>) -> bool {
         ptr::eq(Rc::as_ptr(a) as *const (), Rc::as_ptr(b) as *const ())
     }
@@ -373,6 +378,9 @@ impl ShareKind for ShareSync {
     }
     fn as_mut<T>(inner: &mut Self::Inner<T>) -> Option<&mut T> {
         Arc::get_mut(inner).map(RwLock::get_mut)
+    }
+    fn try_unwrap<T>(inner: Self::Inner<T>) -> Result<T, Self::Inner<T>> {
+        Arc::try_unwrap(inner).map(RwLock::into_inner)
     }
     fn ptr_eq<T, U>(a: &Self::Inner<T>, b: &Self::Inner<U>) -> bool {
         ptr::eq(Arc::as_ptr(a) as *const (), Arc::as_ptr(b) as *const ())
@@ -486,6 +494,17 @@ impl<T, S: ShareKind, E> Shared<T, S, E> {
         T: Clone,
     {
         self.get().clone()
+    }
+    /// Try to move out the inner value. Fails if there are clones.
+    pub fn try_unwrap(self) -> Result<T, Self> {
+        S::try_unwrap(self.0).map_err(|inner| Shared(inner, PhantomData))
+    }
+    /// Move out the inner value, cloning if there are clones
+    pub fn unwrap_or_clone(self) -> T
+    where
+        T: Clone,
+    {
+        self.try_unwrap().unwrap_or_else(|shared| shared.cloned())
     }
     /// Try to get a mutable reference to the value
     ///
@@ -813,5 +832,15 @@ mod test {
         let a = UnsyncByVal::new(Foo);
         let b = UnsyncByVal::new(Bar);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn unwrap() {
+        let x = UnsyncByRef::new(1);
+        assert_eq!(Ok(1), x.try_unwrap());
+
+        let x = UnsyncByRef::new(1);
+        let _y = x.clone();
+        assert!(x.try_unwrap().is_err());
     }
 }
