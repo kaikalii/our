@@ -4,6 +4,7 @@ use std::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     ptr,
     rc::Rc,
@@ -12,8 +13,8 @@ use std::{
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-pub type Mrc<T> = Shared<T, ShareUnsync>;
-pub type Marc<T> = Shared<T, ShareSync>;
+pub type Mrc<T, E = ByRef> = Shared<T, ShareUnsync, E>;
+pub type Marc<T, E = ByRef> = Shared<T, ShareSync, E>;
 
 pub trait ShareKind {
     type Inner<T>: Clone;
@@ -27,6 +28,51 @@ pub trait ShareKind {
     fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool;
     fn ptr_cmp<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> Ordering;
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H);
+}
+
+pub trait EqualityKind<T> {
+    fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> bool;
+}
+pub trait CompareKind<T>: EqualityKind<T> {
+    fn cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> Ordering;
+}
+pub trait HashKind<T> {
+    fn hash<S: ShareKind, H: Hasher>(inner: &S::Inner<T>, state: &mut H);
+}
+
+pub struct ByRef;
+pub struct ByVal;
+
+impl<T> EqualityKind<T> for ByRef {
+    fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> bool {
+        S::ptr_eq(a, b)
+    }
+}
+impl<T> CompareKind<T> for ByRef {
+    fn cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> Ordering {
+        S::ptr_cmp(a, b)
+    }
+}
+impl<T> HashKind<T> for ByRef {
+    fn hash<S: ShareKind, H: Hasher>(inner: &S::Inner<T>, state: &mut H) {
+        S::ptr_hash(inner, state);
+    }
+}
+
+impl<T: Eq> EqualityKind<T> for ByVal {
+    fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> bool {
+        *S::read(a) == *S::read(b)
+    }
+}
+impl<T: Ord> CompareKind<T> for ByVal {
+    fn cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> Ordering {
+        S::read(a).cmp(&S::read(b))
+    }
+}
+impl<T: Hash> HashKind<T> for ByVal {
+    fn hash<S: ShareKind, H: Hasher>(inner: &S::Inner<T>, state: &mut H) {
+        S::read(inner).hash(state);
+    }
 }
 
 pub struct ShareUnsync;
@@ -93,23 +139,41 @@ impl ShareKind for ShareSync {
     }
 }
 
-pub struct Shared<T, K: ShareKind>(K::Inner<T>);
+pub struct Shared<T, S: ShareKind, E = ByRef>(S::Inner<T>, PhantomData<E>);
 
-impl<T, K: ShareKind> Shared<T, K> {
+impl<T, S: ShareKind, E> From<T> for Shared<T, S, E> {
+    fn from(t: T) -> Self {
+        Shared::new(t)
+    }
+}
+
+impl<T, S: ShareKind> Shared<T, S, ByRef> {
+    pub fn new_by_ref(t: T) -> Self {
+        Shared::new(t)
+    }
+}
+
+impl<T, S: ShareKind> Shared<T, S, ByVal> {
+    pub fn new_by_val(t: T) -> Self {
+        Shared::new(t)
+    }
+}
+
+impl<T, S: ShareKind, E> Shared<T, S, E> {
     pub fn new(t: T) -> Self {
-        Shared(K::make(t))
+        Shared(S::make(t), PhantomData)
     }
-    pub fn get(&self) -> ReadGuard<T, K> {
-        ReadGuard(K::read(&self.0))
+    pub fn get(&self) -> ReadGuard<T, S> {
+        ReadGuard(S::read(&self.0))
     }
-    pub fn get_mut(&mut self) -> WriteGuard<T, K> {
-        WriteGuard(K::write(&mut self.0))
+    pub fn get_mut(&mut self) -> WriteGuard<T, S> {
+        WriteGuard(S::write(&mut self.0))
     }
-    pub fn try_get(&self) -> Option<ReadGuard<T, K>> {
-        K::try_read(&self.0).map(ReadGuard)
+    pub fn try_get(&self) -> Option<ReadGuard<T, S>> {
+        S::try_read(&self.0).map(ReadGuard)
     }
-    pub fn try_get_mut(&mut self) -> Option<WriteGuard<T, K>> {
-        K::try_write(&mut self.0).map(WriteGuard)
+    pub fn try_get_mut(&mut self) -> Option<WriteGuard<T, S>> {
+        S::try_write(&mut self.0).map(WriteGuard)
     }
     pub fn set(&mut self, t: T) {
         *self.get_mut() = t;
@@ -142,7 +206,12 @@ impl<T, K: ShareKind> Shared<T, K> {
     }
 }
 
-impl<T, K: ShareKind> fmt::Debug for Shared<T, K>
+impl<T, S: ShareKind, E> Clone for Shared<T, S, E> {
+    fn clone(&self) -> Self {
+        Shared(S::Inner::<T>::clone(&self.0), PhantomData)
+    }
+}
+impl<T, S: ShareKind, E> fmt::Debug for Shared<T, S, E>
 where
     T: fmt::Debug,
 {
@@ -155,7 +224,7 @@ where
     }
 }
 
-impl<T, K: ShareKind> fmt::Display for Shared<T, K>
+impl<T, S: ShareKind, E> fmt::Display for Shared<T, S, E>
 where
     T: fmt::Display,
 {
@@ -168,17 +237,53 @@ where
     }
 }
 
-impl<T, K: ShareKind> PartialEq for Shared<T, K> {
+impl<T, S: ShareKind, E: EqualityKind<T>> PartialEq for Shared<T, S, E> {
     fn eq(&self, other: &Self) -> bool {
-        K::ptr_eq(&self.0, &other.0)
+        E::eq::<S>(&self.0, &other.0)
     }
 }
 
-impl<T, K: ShareKind> Eq for Shared<T, K> {}
+impl<T: PartialEq, S: ShareKind> PartialEq<T> for Shared<T, S, ByVal> {
+    fn eq(&self, other: &T) -> bool {
+        *self.get() == *other
+    }
+}
 
-impl<T, K: ShareKind> Hash for Shared<T, K> {
+impl<S: ShareKind> PartialEq<str> for Shared<String, S, ByVal> {
+    fn eq(&self, other: &str) -> bool {
+        *self.get() == other
+    }
+}
+
+impl<'a, S: ShareKind> PartialEq<&'a str> for Shared<String, S, ByVal> {
+    fn eq(&self, other: &&'a str) -> bool {
+        *self.get() == *other
+    }
+}
+
+impl<T, S: ShareKind, E: EqualityKind<T>> Eq for Shared<T, S, E> {}
+
+impl<T, S: ShareKind, E: CompareKind<T>> PartialOrd for Shared<T, S, E> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(E::cmp::<S>(&self.0, &other.0))
+    }
+}
+
+impl<T: PartialOrd, S: ShareKind> PartialOrd<T> for Shared<T, S, ByVal> {
+    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
+        Some((*self.get()).partial_cmp(other).unwrap())
+    }
+}
+
+impl<T, S: ShareKind, E: CompareKind<T>> Ord for Shared<T, S, E> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        E::cmp::<S>(&self.0, &other.0)
+    }
+}
+
+impl<T, S: ShareKind, E: HashKind<T>> Hash for Shared<T, S, E> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        K::ptr_hash(&self.0, state);
+        E::hash::<S, _>(&self.0, state)
     }
 }
 
@@ -282,5 +387,21 @@ impl<'a, T, K: ShareKind> AsMut<T> for WriteGuard<'a, T, K> {
 impl<'a, T, K: ShareKind> BorrowMut<T> for WriteGuard<'a, T, K> {
     fn borrow_mut(&mut self) -> &mut T {
         self.deref_mut()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn equality() {
+        let a = Mrc::new_by_ref(1);
+        let b = Mrc::new_by_ref(1);
+        assert_ne!(a, b);
+
+        let a = Mrc::new_by_val(1);
+        let b = Mrc::new_by_val(1);
+        assert_eq!(a, b);
     }
 }
