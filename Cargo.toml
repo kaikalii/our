@@ -9,7 +9,7 @@ license = 'Unlicense'
 name = 'our'
 readme = 'readme.md'
 repository = 'https://github.com/kaikalii/our'
-version = '0.1.0'
+version = '0.2.0'
 
 [dependencies]
 parking_lot = '0.12.1'
