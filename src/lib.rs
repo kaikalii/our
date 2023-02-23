@@ -21,7 +21,7 @@ to prevent at compile-time accidentally trying to acquire two exclusive guards, 
 - A [`ShareKind`], which determines how the shared value is constructed and accessed
     - [`ShareUnsync`] is a non-thread-safe shared value implemented as `Rc<RefCell<T>>`
     - [`ShareSync`] is a thread-safe shared value implemented as `Arc<parking_lot::RwLock<T>>`
-- A type which usually implements [`EqualityKind`], [`CompareKind`], and [`HashKind`],
+- A type which usually implements [`PartialEqKind`], [`EqKind`], [`PartialOrdKind`], [`OrdKind`], and [`HashKind`],
 which determines how shared values are compared and hashed.
     - [`ByRef`] compares and hashes by reference
     - [`ByVal`] compares and hashes by value
@@ -92,13 +92,20 @@ pub type UnsyncReadGuard<'a, T> = ReadGuard<'a, T, GuardUnsync>;
 /// A non-thread-safe write guard
 pub type UnsyncWriteGuard<'a, T> = WriteGuard<'a, T, GuardUnsync>;
 
-/// A way of comparing two shared value for equality
-pub trait EqualityKind<T> {
+/// A way of comparing two shared value for partial equality
+pub trait PartialEqKind<T, U> {
     /// Compare two shared values for equality
-    fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> bool;
+    fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<U>) -> bool;
+}
+/// A way of comparing two shared value for equality
+pub trait EqKind<T>: PartialEqKind<T, T> {}
+/// A way of comparing two shared value for partial ordering
+pub trait PartialOrdKind<T, U>: PartialEqKind<T, U> {
+    /// Compare two shared values for partial ordering
+    fn partial_cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<U>) -> Option<Ordering>;
 }
 /// A way of comparing two shared value for ordering
-pub trait CompareKind<T>: EqualityKind<T> {
+pub trait OrdKind<T>: EqKind<T> + PartialOrdKind<T, T> {
     /// Compare two shared values for ordering
     fn cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> Ordering;
 }
@@ -113,12 +120,21 @@ pub struct ByRef;
 /// Compare and hash shared values by value
 pub struct ByVal;
 
-impl<T> EqualityKind<T> for ByRef {
+impl<T> PartialEqKind<T, T> for ByRef {
     fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> bool {
         S::ptr_eq(a, b)
     }
 }
-impl<T> CompareKind<T> for ByRef {
+impl<T> EqKind<T> for ByRef {}
+impl<T, U> PartialOrdKind<T, U> for ByRef
+where
+    Self: PartialEqKind<T, U>,
+{
+    fn partial_cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<U>) -> Option<Ordering> {
+        Some(S::ptr_cmp(a, b))
+    }
+}
+impl<T> OrdKind<T> for ByRef {
     fn cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> Ordering {
         S::ptr_cmp(a, b)
     }
@@ -129,12 +145,24 @@ impl<T> HashKind<T> for ByRef {
     }
 }
 
-impl<T: Eq> EqualityKind<T> for ByVal {
-    fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> bool {
+impl<T: PartialEq<U>, U> PartialEqKind<T, U> for ByVal {
+    fn eq<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<U>) -> bool {
         *S::read(a) == *S::read(b)
     }
 }
-impl<T: Ord> CompareKind<T> for ByVal {
+impl<T: Eq> EqKind<T> for ByVal {}
+impl<T: PartialOrd<U>, U> PartialOrdKind<T, U> for ByVal
+where
+    Self: PartialEqKind<T, U>,
+{
+    fn partial_cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<U>) -> Option<Ordering> {
+        S::read(a).partial_cmp(&S::read(b))
+    }
+}
+impl<T: Ord> OrdKind<T> for ByVal
+where
+    Self: EqKind<T> + PartialOrdKind<T, T>,
+{
     fn cmp<S: ShareKind>(a: &S::Inner<T>, b: &S::Inner<T>) -> Ordering {
         S::read(a).cmp(&S::read(b))
     }
@@ -269,9 +297,9 @@ pub trait ShareKind {
         Self::as_mut(inner).unwrap()
     }
     /// Compare two inner values for pointer equality
-    fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool;
+    fn ptr_eq<T, U>(a: &Self::Inner<T>, b: &Self::Inner<U>) -> bool;
     /// Compare two inner values for pointer ordering
-    fn ptr_cmp<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> Ordering;
+    fn ptr_cmp<T, U>(a: &Self::Inner<T>, b: &Self::Inner<U>) -> Ordering;
     /// Hash an inner value by pointer
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H);
 }
@@ -307,11 +335,11 @@ impl ShareKind for ShareUnsync {
     fn make_mut<T: Clone>(inner: &mut Self::Inner<T>) -> &mut T {
         Rc::make_mut(inner).get_mut()
     }
-    fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool {
-        Rc::ptr_eq(a, b)
+    fn ptr_eq<T, U>(a: &Self::Inner<T>, b: &Self::Inner<U>) -> bool {
+        ptr::eq(Rc::as_ptr(a) as *const (), Rc::as_ptr(b) as *const ())
     }
-    fn ptr_cmp<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> Ordering {
-        Rc::as_ptr(a).cmp(&Rc::as_ptr(b))
+    fn ptr_cmp<T, U>(a: &Self::Inner<T>, b: &Self::Inner<U>) -> Ordering {
+        (Rc::as_ptr(a) as *const ()).cmp(&(Rc::as_ptr(b) as *const ()))
     }
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H) {
         ptr::hash(Rc::as_ptr(inner), state);
@@ -346,11 +374,11 @@ impl ShareKind for ShareSync {
     fn as_mut<T>(inner: &mut Self::Inner<T>) -> Option<&mut T> {
         Arc::get_mut(inner).map(RwLock::get_mut)
     }
-    fn ptr_eq<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> bool {
-        Arc::ptr_eq(a, b)
+    fn ptr_eq<T, U>(a: &Self::Inner<T>, b: &Self::Inner<U>) -> bool {
+        ptr::eq(Arc::as_ptr(a) as *const (), Arc::as_ptr(b) as *const ())
     }
-    fn ptr_cmp<T>(a: &Self::Inner<T>, b: &Self::Inner<T>) -> Ordering {
-        Arc::as_ptr(a).cmp(&Arc::as_ptr(b))
+    fn ptr_cmp<T, U>(a: &Self::Inner<T>, b: &Self::Inner<U>) -> Ordering {
+        (Arc::as_ptr(a) as *const ()).cmp(&(Arc::as_ptr(b) as *const ()))
     }
     fn ptr_hash<T, H: Hasher>(inner: &Self::Inner<T>, state: &mut H) {
         ptr::hash(Arc::as_ptr(inner), state);
@@ -523,21 +551,9 @@ where
     }
 }
 
-impl<T, S: ShareKind, E: EqualityKind<T>> PartialEq for Shared<T, S, E> {
-    fn eq(&self, other: &Self) -> bool {
+impl<T, U, S: ShareKind, E: PartialEqKind<T, U>> PartialEq<Shared<U, S, E>> for Shared<T, S, E> {
+    fn eq(&self, other: &Shared<U, S, E>) -> bool {
         E::eq::<S>(&self.0, &other.0)
-    }
-}
-
-impl<'a, T, S: ShareKind, E: EqualityKind<T>> PartialEq<&'a Self> for Shared<T, S, E> {
-    fn eq(&self, other: &&'a Self) -> bool {
-        E::eq::<S>(&self.0, &other.0)
-    }
-}
-
-impl<T: PartialEq, S: ShareKind> PartialEq<T> for Shared<T, S, ByVal> {
-    fn eq(&self, other: &T) -> bool {
-        *self.get() == *other
     }
 }
 
@@ -553,21 +569,15 @@ impl<'a, S: ShareKind> PartialEq<&'a str> for Shared<String, S, ByVal> {
     }
 }
 
-impl<T, S: ShareKind, E: EqualityKind<T>> Eq for Shared<T, S, E> {}
+impl<T, S: ShareKind, E: EqKind<T>> Eq for Shared<T, S, E> {}
 
-impl<T, S: ShareKind, E: CompareKind<T>> PartialOrd for Shared<T, S, E> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(E::cmp::<S>(&self.0, &other.0))
+impl<T, U, S: ShareKind, E: PartialOrdKind<T, U>> PartialOrd<Shared<U, S, E>> for Shared<T, S, E> {
+    fn partial_cmp(&self, other: &Shared<U, S, E>) -> Option<Ordering> {
+        E::partial_cmp::<S>(&self.0, &other.0)
     }
 }
 
-impl<T: PartialOrd, S: ShareKind> PartialOrd<T> for Shared<T, S, ByVal> {
-    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
-        Some((*self.get()).partial_cmp(other).unwrap())
-    }
-}
-
-impl<T, S: ShareKind, E: CompareKind<T>> Ord for Shared<T, S, E> {
+impl<T, S: ShareKind, E: OrdKind<T>> Ord for Shared<T, S, E> {
     fn cmp(&self, other: &Self) -> Ordering {
         E::cmp::<S>(&self.0, &other.0)
     }
@@ -787,5 +797,21 @@ mod test {
         });
         assert_eq!(x.get(), 3);
         assert_eq!(y, 9);
+    }
+
+    #[test]
+    fn partial_eq() {
+        #[derive(Debug)]
+        struct Foo;
+        #[derive(Debug)]
+        struct Bar;
+        impl PartialEq<Bar> for Foo {
+            fn eq(&self, _: &Bar) -> bool {
+                true
+            }
+        }
+        let a = UnsyncByVal::new(Foo);
+        let b = UnsyncByVal::new(Bar);
+        assert_eq!(a, b);
     }
 }
